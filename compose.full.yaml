@@ -127,6 +127,11 @@ services:
       kafka:
         condition: service_healthy
 
+  # Patch load-generator to enable DB order verification (accounting writes orders to Postgres)
+  load-generator:
+    environment:
+      - VERIFY_ACCOUNTING_ORDERS=true
+
   # Patch otel-collector to add Kafka metrics receiver
   otel-collector:
     command:

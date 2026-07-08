@@ -8,13 +8,14 @@ import os
 import random
 import uuid
 import logging
+import time
 
 from locust import HttpUser, task, between
 from locust_plugins.users.playwright import PlaywrightUser, pw, PageWithRetry, event
 
 from opentelemetry import context, baggage, trace
 from opentelemetry.context import Context
-from opentelemetry.metrics import set_meter_provider
+from opentelemetry.metrics import set_meter_provider, get_meter
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.trace import TracerProvider
@@ -31,6 +32,13 @@ from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
 from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.resources import Resource
+
+try:
+    import pg8000
+    HAS_PG8000 = True
+except ImportError:
+    pg8000 = None
+    HAS_PG8000 = False
 
 from openfeature import api
 from openfeature.contrib.provider.ofrep import OFREPProvider
@@ -62,6 +70,12 @@ root_logger.setLevel(logging.INFO)
 # Configure metrics
 metric_exporter = OTLPMetricExporter(insecure=True)
 set_meter_provider(MeterProvider([PeriodicExportingMetricReader(metric_exporter)]))
+meter = get_meter(__name__)
+migration_checkout_counter = meter.create_counter(
+    "migration.checkout.attempts",
+    unit="1",
+    description="Checkout attempts during migration, tagged by status and order_id",
+)
 
 # Instrument logging to automatically inject trace context
 LoggingInstrumentor().instrument(set_logging_format=True)
@@ -116,6 +130,8 @@ class WebsiteUser(HttpUser):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.tracer = trace.get_tracer(__name__)
+        self.order_ids = []
+        self.last_verify = 0.0
 
     @task(1)
     def index(self):
@@ -174,28 +190,39 @@ class WebsiteUser(HttpUser):
             }
             self.client.post("/api/cart", json=cart_item)
 
+    def _process_checkout(self, user, checkout_person, multi_count=1):
+        with self.tracer.start_as_current_span("user_checkout", context=context.get_current(), attributes={"user.id": user, "item.count": multi_count}):
+            for i in range(multi_count):
+                self.add_to_cart(user=user)
+            with self.client.post("/api/checkout", json=checkout_person, catch_response=True) as resp:
+                if resp.status_code != 200:
+                    resp.failure(f"Checkout failed: HTTP {resp.status_code}")
+                    migration_checkout_counter.add(1, {"status": "failure", "error": str(resp.status_code)})
+                else:
+                    body = resp.json()
+                    order_id = body.get("orderId")
+                    if not order_id:
+                        resp.failure("Checkout response missing order_id")
+                        migration_checkout_counter.add(1, {"status": "failure", "error": "missing_order_id"})
+                    else:
+                        self.order_ids.append(order_id)
+                        migration_checkout_counter.add(1, {"status": "success"})
+                        logging.info(f"Order placed: {order_id}")
+
     @task(1)
     def checkout(self):
         user = str(uuid.uuid1())
-        with self.tracer.start_as_current_span("user_checkout_single", context=context.get_current(), attributes={"user.id": user}):
-            self.add_to_cart(user=user)
-            checkout_person = random.choice(people)
-            checkout_person["userId"] = user
-            self.client.post("/api/checkout", json=checkout_person)
-            logging.info(f"Checkout completed for user {user}")
+        checkout_person = random.choice(people).copy()
+        checkout_person["userId"] = user
+        self._process_checkout(user, checkout_person, multi_count=1)
 
     @task(1)
     def checkout_multi(self):
         user = str(uuid.uuid1())
         item_count = random.choice([2, 3, 4])
-        with self.tracer.start_as_current_span("user_checkout_multi", context=context.get_current(),
-                                            attributes={"user.id": user, "item.count": item_count}):
-            for i in range(item_count):
-                self.add_to_cart(user=user)
-            checkout_person = random.choice(people)
-            checkout_person["userId"] = user
-            self.client.post("/api/checkout", json=checkout_person)
-            logging.info(f"Multi-item checkout completed for user {user}")
+        checkout_person = random.choice(people).copy()
+        checkout_person["userId"] = user
+        self._process_checkout(user, checkout_person, multi_count=item_count)
 
     @task(5)
     def flood_home(self):
@@ -205,6 +232,41 @@ class WebsiteUser(HttpUser):
                 logging.info(f"User flooding homepage {flood_count} times")
                 for _ in range(0, flood_count):
                     self.client.get("/")
+
+    @task(1)
+    def verify_orders(self):
+        if not self.order_ids:
+            return
+        if not HAS_PG8000:
+            return
+        now = time.time()
+        if now - self.last_verify < 30:
+            return
+        self.last_verify = now
+        db_host = os.environ.get("POSTGRES_HOST", "db-router")
+        db_port = int(os.environ.get("POSTGRES_PORT", 5432))
+        db_password = os.environ.get("POSTGRES_ASTRONOMY_PASSWORD", "astronomy_password")
+        try:
+            conn = pg8000.connect(
+                host=db_host,
+                port=db_port,
+                database="astronomy_db",
+                user="astronomy_user",
+                password=db_password,
+                timeout=3,
+            )
+            cur = conn.cursor()
+            for oid in list(self.order_ids):
+                cur.execute('SELECT 1 FROM accounting."order" WHERE order_id = %s', (oid,))
+                if cur.fetchone() is None:
+                    self.environment.runner.stats.log_error("VERIFY", "/api/checkout", f"Order {oid} not found in DB")
+                    logging.error(f"Order {oid} missing from database")
+                else:
+                    self.order_ids.remove(oid)
+            cur.close()
+            conn.close()
+        except Exception as ex:
+            logging.warning(f"Verifier could not connect to PostgreSQL at {db_host}:{db_port}: {ex}")
 
     def on_start(self):
         session_id = str(uuid.uuid4())

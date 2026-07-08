@@ -433,6 +433,9 @@ services:
       - FLAGD_HOST
       - FLAGD_PORT
       - FLAGD_OFREP_PORT
+      - POSTGRES_HOST
+      - POSTGRES_PORT
+      - POSTGRES_ASTRONOMY_PASSWORD
     healthcheck:
       test: ["CMD", "python3", "-c", "import socket; s=socket.create_connection(('localhost',${LOCUST_WEB_PORT}),2); s.close()"]
       start_period: 30s
