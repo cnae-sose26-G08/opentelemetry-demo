@@ -734,3 +734,4 @@ func createProducerSpan(ctx context.Context, msg *sarama.ProducerMessage) trace.
 
 	return span
 }
+
