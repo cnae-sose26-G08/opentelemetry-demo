@@ -14,14 +14,14 @@ const CartGateway = () => ({
       client.getCart({ userId }, (error, response) => (error ? reject(error) : resolve(response)))
     );
   },
-  addItem(userId: string, item: CartItem) {
+  addItem(userId: string, item: CartItem, operationId: string) {
     return new Promise<Empty>((resolve, reject) =>
-      client.addItem({ userId, item }, (error, response) => (error ? reject(error) : resolve(response)))
+      client.addItem({ userId, item, operationId }, (error, response) => (error ? reject(error) : resolve(response)))
     );
   },
-  emptyCart(userId: string) {
+  emptyCart(userId: string, operationId: string) {
     return new Promise<Empty>((resolve, reject) =>
-      client.emptyCart({ userId }, (error, response) => (error ? reject(error) : resolve(response)))
+      client.emptyCart({ userId, operationId }, (error, response) => (error ? reject(error) : resolve(response)))
     );
   },
 });

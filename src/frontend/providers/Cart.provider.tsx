@@ -62,7 +62,7 @@ const CartProvider = ({ children }: IProps) => {
   });
 
   const addItem = useCallback(
-    (item: CartItem) => addCartMutation.mutateAsync({ ...item, currencyCode: selectedCurrency }),
+    (item: CartItem) => addCartMutation.mutateAsync({ ...item, currencyCode: selectedCurrency, operationId: crypto.randomUUID() }),
     [addCartMutation, selectedCurrency]
   );
 
@@ -71,12 +71,12 @@ const CartProvider = ({ children }: IProps) => {
       const existing = cart.items.find(i => i.productId === productId);
       const delta = newQuantity - (existing?.quantity ?? 0);
       if (delta !== 0) {
-        addCartMutation.mutateAsync({ productId, quantity: delta, currencyCode: selectedCurrency });
+        addCartMutation.mutateAsync({ productId, quantity: delta, currencyCode: selectedCurrency, operationId: crypto.randomUUID() });
       }
     },
     [addCartMutation, cart.items, selectedCurrency]
   );
-  const emptyCart = useCallback(() => emptyCartMutation.mutateAsync(), [emptyCartMutation]);
+  const emptyCart = useCallback(() => emptyCartMutation.mutateAsync({ operationId: crypto.randomUUID() }), [emptyCartMutation]);
   const placeOrder = useCallback(
     (order: PlaceOrderRequest) => placeOrderMutation.mutateAsync({ ...order, currencyCode: selectedCurrency }),
     [placeOrderMutation, selectedCurrency]

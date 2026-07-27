@@ -19,19 +19,19 @@ const Apis = () => ({
       queryParams: { sessionId: userId, currencyCode },
     });
   },
-  addCartItem({ currencyCode, ...item }: CartItem & { currencyCode: string }) {
+  addCartItem({ currencyCode, operationId, ...item }: CartItem & { currencyCode: string; operationId: string }) {
     return request<Cart>({
       url: `${basePath}/cart`,
-      body: { item, userId },
+      body: { item, userId, operationId },
       queryParams: { currencyCode },
       method: 'POST',
     });
   },
-  emptyCart() {
+  emptyCart({ operationId }: { operationId: string }) {
     return request<undefined>({
       url: `${basePath}/cart`,
       method: 'DELETE',
-      body: { userId },
+      body: { userId, operationId },
     });
   },
 

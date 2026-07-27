@@ -32,17 +32,17 @@ const handler: NextApiHandler<TResponse> = async ({ method, body, query }, res) 
     }
 
     case 'POST': {
-      const { userId, item } = body as AddItemRequest;
+      const { userId, item, operationId } = body as AddItemRequest;
 
-      await CartGateway.addItem(userId, item!);
+      await CartGateway.addItem(userId, item!, operationId);
       const cart = await CartGateway.getCart(userId);
 
       return res.status(200).json(cart);
     }
 
     case 'DELETE': {
-      const { userId } = body as AddItemRequest;
-      await CartGateway.emptyCart(userId);
+      const { userId, operationId } = body as AddItemRequest;
+      await CartGateway.emptyCart(userId, operationId);
 
       return res.status(204).send('');
     }
