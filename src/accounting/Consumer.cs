@@ -13,15 +13,20 @@ namespace Accounting;
 
 internal class DBContext : DbContext
 {
+    private readonly string _connectionString;
+
+    public DBContext(string connectionString)
+    {
+        _connectionString = connectionString;
+    }
+
     public DbSet<OrderEntity> Orders { get; set; }
     public DbSet<OrderItemEntity> CartItems { get; set; }
     public DbSet<ShippingEntity> Shipping { get; set; }
 
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
     {
-        var connectionString = Environment.GetEnvironmentVariable("DB_CONNECTION_STRING");
-
-        optionsBuilder.UseNpgsql(connectionString).UseSnakeCaseNamingConvention();
+        optionsBuilder.UseNpgsql(_connectionString).UseSnakeCaseNamingConvention();
     }
 }
 
@@ -29,11 +34,20 @@ internal class DBContext : DbContext
 internal class Consumer : BackgroundService
 {
     private const string TopicName = "orders";
+    private const int MaxMessageRetryAttempts = 7;
 
     private readonly ILogger _logger;
     private readonly IConsumer<string, byte[]> _consumer;
     private readonly string? _dbConnectionString;
     private static readonly ActivitySource MyActivitySource = new("Accounting.Consumer");
+
+    private enum ProcessingResult
+    {
+        Persisted,
+        Duplicate,
+        RetryableFailure,
+        FatalInvalidMessage,
+    }
 
     public Consumer(ILogger<Consumer> logger)
     {
@@ -62,7 +76,25 @@ internal class Consumer : BackgroundService
                 {
                     using var activity = MyActivitySource.StartActivity("order-consumed",  ActivityKind.Internal);
                     var consumeResult = _consumer.Consume(stoppingToken);
-                    ProcessMessage(consumeResult.Message);
+                    var result = ProcessingResult.RetryableFailure;
+                    for (var attempt = 0; attempt < MaxMessageRetryAttempts && result == ProcessingResult.RetryableFailure; attempt++)
+                    {
+                        result = await ProcessMessageAsync(consumeResult.Message, stoppingToken);
+                        if (result == ProcessingResult.RetryableFailure && attempt + 1 < MaxMessageRetryAttempts)
+                        {
+                            await Task.Delay(TimeSpan.FromSeconds(Math.Min(1 << attempt, 5)), stoppingToken);
+                        }
+                    }
+                    if (result is ProcessingResult.Persisted or ProcessingResult.Duplicate or ProcessingResult.FatalInvalidMessage)
+                    {
+                        _consumer.Commit(consumeResult);
+                    }
+                    else
+                    {
+                        _logger.LogError("Order persistence retry budget exhausted; seeking to the failed Kafka record without committing its offset.");
+                        _consumer.Seek(consumeResult.TopicPartitionOffset);
+                        await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+                    }
                 }
                 catch (ConsumeException e)
                 {
@@ -80,27 +112,39 @@ internal class Consumer : BackgroundService
         }
     }
 
-    private void ProcessMessage(Message<string, byte[]> message)
+    private async Task<ProcessingResult> ProcessMessageAsync(Message<string, byte[]> message, CancellationToken stoppingToken)
     {
+        OrderResult order;
         try
         {
-            var order = OrderResult.Parser.ParseFrom(message.Value);
-            Log.OrderReceivedMessage(_logger, order);
-
-            if (_dbConnectionString == null)
+            order = OrderResult.Parser.ParseFrom(message.Value);
+            if (string.IsNullOrWhiteSpace(order.OrderId))
             {
-                return;
+                Log.OrderParsingFailed(_logger, new InvalidOperationException("order_id is required"));
+                return ProcessingResult.FatalInvalidMessage;
             }
+            Log.OrderReceivedMessage(_logger, order);
+        }
+        catch (Exception ex)
+        {
+            Log.OrderParsingFailed(_logger, ex);
+            return ProcessingResult.FatalInvalidMessage;
+        }
 
-            using var dbContext = new DBContext();
-            var orderEntity = new OrderEntity
-            {
-                Id = order.OrderId
-            };
-            dbContext.Add(orderEntity);
+        if (_dbConnectionString == null)
+        {
+            Log.OrderParsingFailed(_logger, new InvalidOperationException("DB_CONNECTION_STRING is not set"));
+            return ProcessingResult.RetryableFailure;
+        }
+
+        try
+        {
+            using var dbContext = new DBContext(_dbConnectionString);
+            await using var transaction = await dbContext.Database.BeginTransactionAsync(stoppingToken);
+            dbContext.Add(new OrderEntity { Id = order.OrderId });
             foreach (var item in order.Items)
             {
-                var orderItem = new OrderItemEntity
+                dbContext.Add(new OrderItemEntity
                 {
                     ItemCostCurrencyCode = item.Cost.CurrencyCode,
                     ItemCostUnits = item.Cost.Units,
@@ -108,12 +152,10 @@ internal class Consumer : BackgroundService
                     ProductId = item.Item.ProductId,
                     Quantity = item.Item.Quantity,
                     OrderId = order.OrderId
-                };
-
-                dbContext.Add(orderItem);
+                });
             }
 
-            var shipping = new ShippingEntity
+            dbContext.Add(new ShippingEntity
             {
                 ShippingTrackingId = order.ShippingTrackingId,
                 ShippingCostCurrencyCode = order.ShippingCost.CurrencyCode,
@@ -125,17 +167,20 @@ internal class Consumer : BackgroundService
                 Country = order.ShippingAddress.Country,
                 ZipCode = order.ShippingAddress.ZipCode,
                 OrderId = order.OrderId
-            };
-            dbContext.Add(shipping);
-            dbContext.SaveChanges();
+            });
+            await dbContext.SaveChangesAsync(stoppingToken);
+            await transaction.CommitAsync(stoppingToken);
+            return ProcessingResult.Persisted;
         }
         catch (DbUpdateException ex) when (ex.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation })
         {
             Log.DuplicateOrderSkipped(_logger);
+            return ProcessingResult.Duplicate;
         }
         catch (Exception ex)
         {
             Log.OrderParsingFailed(_logger, ex);
+            return ProcessingResult.RetryableFailure;
         }
     }
 
@@ -147,7 +192,8 @@ internal class Consumer : BackgroundService
             BootstrapServers = servers,
             // https://github.com/confluentinc/confluent-kafka-dotnet/tree/07de95ed647af80a0db39ce6a8891a630423b952#basic-consumer-example
             AutoOffsetReset = AutoOffsetReset.Earliest,
-            EnableAutoCommit = true
+            EnableAutoCommit = false,
+            EnableAutoOffsetStore = false,
         };
 
         return new ConsumerBuilder<string, byte[]>(conf)
