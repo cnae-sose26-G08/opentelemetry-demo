@@ -1,7 +1,6 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 using System;
-using System.Linq;
 using System.Threading.Tasks;
 using Grpc.Core;
 using StackExchange.Redis;
@@ -15,14 +14,52 @@ namespace cart.cartstore;
 public class ValkeyCartStore : ICartStore
 {
     private readonly ILogger _logger;
-    private const string CartFieldName = "cart";
     private const int RedisRetryNumber = 30;
+    private static readonly TimeSpan CartTtl = TimeSpan.FromHours(2);
+    private static readonly TimeSpan OperationTtl = TimeSpan.FromHours(2);
+    private static readonly TimeSpan OperationDeadline = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan[] RetryDelays =
+    [
+        TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(250), TimeSpan.FromMilliseconds(500),
+        TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(5),
+    ];
+    private const string AddItemScript = """
+        local existing = redis.call('HGET', KEYS[2], ARGV[1])
+        if existing then return tonumber(redis.call('HGET', KEYS[1], ARGV[2]) or '0') end
+        redis.call('HSET', KEYS[2], ARGV[1], '1')
+        local quantity = redis.call('HINCRBY', KEYS[1], ARGV[2], ARGV[3])
+        if quantity <= 0 then
+          redis.call('HDEL', KEYS[1], ARGV[2])
+          quantity = 0
+        end
+        redis.call('EXPIRE', KEYS[1], ARGV[4])
+        redis.call('EXPIRE', KEYS[2], ARGV[5])
+        return quantity
+        """;
+    private const string EmptyCartScript = """
+        if redis.call('HEXISTS', KEYS[2], ARGV[1]) == 1 then return 1 end
+        redis.call('HSET', KEYS[2], ARGV[1], '1')
+        redis.call('DEL', KEYS[1])
+        redis.call('EXPIRE', KEYS[2], ARGV[2])
+        return 1
+        """;
+    private const string MigrateLegacyCartScript = """
+        if redis.call('HLEN', KEYS[1]) ~= 0 then
+          redis.call('HDEL', KEYS[2], 'cart')
+          return 0
+        end
+        for index = 1, #ARGV - 1, 2 do
+          redis.call('HSET', KEYS[1], ARGV[index], ARGV[index + 1])
+        end
+        redis.call('EXPIRE', KEYS[1], ARGV[#ARGV])
+        redis.call('HDEL', KEYS[2], 'cart')
+        return 1
+        """;
 
     private volatile ConnectionMultiplexer _redis;
     private volatile bool _isRedisConnectionOpened;
 
     private readonly object _locker = new();
-    private readonly byte[] _emptyCartBytes;
     private readonly string _connectionString;
 
     private static readonly ActivitySource CartActivitySource = new("OpenTelemetry.Demo.Cart");
@@ -46,9 +83,6 @@ public class ValkeyCartStore : ICartStore
     public ValkeyCartStore(ILogger<ValkeyCartStore> logger, string valkeyAddress)
     {
         _logger = logger;
-        // Serialize empty cart into byte array.
-        var cart = new Oteldemo.Cart();
-        _emptyCartBytes = cart.ToByteArray();
         _connectionString = $"{valkeyAddress},ssl=false,allowAdmin=true,abortConnect=false";
 
         _redisConnectionOptions = ConfigurationOptions.Parse(_connectionString);
@@ -123,7 +157,7 @@ public class ValkeyCartStore : ICartStore
         }
     }
 
-    public async Task AddItemAsync(string userId, string productId, int quantity)
+    public async Task AddItemAsync(string userId, string productId, int quantity, string operationId)
     {
         var stopwatch = Stopwatch.StartNew();
 
@@ -131,38 +165,20 @@ public class ValkeyCartStore : ICartStore
 
         try
         {
-            EnsureRedisConnected();
-
-            var db = _redis.GetDatabase();
-
-            // Access the cart from the cache
-            var value = await db.HashGetAsync(userId, CartFieldName);
-
-            Oteldemo.Cart cart;
-            if (value.IsNull)
+            RequireOperationId(operationId);
+            await MigrateLegacyCartAsync(userId);
+            var itemKey = ItemKey(userId);
+            await RetryTransientAsync(async () =>
             {
-                cart = new Oteldemo.Cart
-                {
-                    UserId = userId
-                };
-                cart.Items.Add(new Oteldemo.CartItem { ProductId = productId, Quantity = quantity });
-            }
-            else
-            {
-                cart = Oteldemo.Cart.Parser.ParseFrom(value);
-                var existingItem = cart.Items.SingleOrDefault(i => i.ProductId == productId);
-                if (existingItem == null)
-                {
-                    cart.Items.Add(new Oteldemo.CartItem { ProductId = productId, Quantity = quantity });
-                }
-                else
-                {
-                    existingItem.Quantity += quantity;
-                }
-            }
-
-            await db.HashSetAsync(userId, new[]{ new HashEntry(CartFieldName, cart.ToByteArray()) });
-            await db.KeyExpireAsync(userId, TimeSpan.FromMinutes(60));
+                EnsureRedisConnected();
+                await _redis.GetDatabase().ScriptEvaluateAsync(AddItemScript,
+                    [itemKey, OperationKey(userId)],
+                    [operationId, productId, quantity, (long)CartTtl.TotalSeconds, (long)OperationTtl.TotalSeconds]);
+            });
+        }
+        catch (RpcException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -174,17 +190,24 @@ public class ValkeyCartStore : ICartStore
         }
     }
 
-    public async Task EmptyCartAsync(string userId)
+    public async Task EmptyCartAsync(string userId, string operationId)
     {
         Log.EmptyCartAsync(_logger, userId);
         try
         {
-            EnsureRedisConnected();
-            var db = _redis.GetDatabase();
-
-            // Update the cache with empty cart for given user
-            await db.HashSetAsync(userId, new[] { new HashEntry(CartFieldName, _emptyCartBytes) });
-            await db.KeyExpireAsync(userId, TimeSpan.FromMinutes(60));
+            RequireOperationId(operationId);
+            await MigrateLegacyCartAsync(userId);
+            await RetryTransientAsync(async () =>
+            {
+                EnsureRedisConnected();
+                await _redis.GetDatabase().ScriptEvaluateAsync(EmptyCartScript,
+                    [ItemKey(userId), OperationKey(userId)],
+                    [operationId, (long)OperationTtl.TotalSeconds]);
+            });
+        }
+        catch (RpcException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -204,16 +227,21 @@ public class ValkeyCartStore : ICartStore
 
             var db = _redis.GetDatabase();
 
-            // Access the cart from the cache
-            var value = await db.HashGetAsync(userId, CartFieldName);
-
-            if (!value.IsNull)
+            var values = await db.HashGetAllAsync(ItemKey(userId));
+            if (values.Length == 0)
             {
-                return Oteldemo.Cart.Parser.ParseFrom(value);
+                var legacyCart = await db.HashGetAsync(userId, "cart");
+                if (!legacyCart.IsNull)
+                {
+                    return Oteldemo.Cart.Parser.ParseFrom(legacyCart);
+                }
             }
-
-            // We decided to return empty cart in cases when user wasn't in the cache before
-            return new Oteldemo.Cart();
+            var cart = new Oteldemo.Cart { UserId = userId };
+            foreach (var value in values)
+            {
+                cart.Items.Add(new Oteldemo.CartItem { ProductId = value.Name.ToString(), Quantity = (int)value.Value });
+            }
+            return cart;
         }
         catch (Exception ex)
         {
@@ -236,6 +264,66 @@ public class ValkeyCartStore : ICartStore
         catch (Exception)
         {
             return false;
+        }
+    }
+
+    private static string ItemKey(string userId) => $"cart:{{{userId}}}:items";
+
+    private static string OperationKey(string userId) => $"cart:{{{userId}}}:operations";
+
+    private static void RequireOperationId(string operationId)
+    {
+        if (string.IsNullOrWhiteSpace(operationId))
+        {
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "operation_id is required"));
+        }
+    }
+
+    private static bool IsTransient(Exception exception) => exception is RedisConnectionException or RedisTimeoutException;
+
+    private async Task MigrateLegacyCartAsync(string userId)
+    {
+        EnsureRedisConnected();
+        var db = _redis.GetDatabase();
+        var legacyCart = await db.HashGetAsync(userId, "cart");
+        if (legacyCart.IsNull)
+        {
+            return;
+        }
+
+        var cart = Oteldemo.Cart.Parser.ParseFrom(legacyCart);
+        if (cart.Items.Count == 0)
+        {
+            return;
+        }
+
+        var arguments = new RedisValue[cart.Items.Count * 2 + 1];
+        for (var index = 0; index < cart.Items.Count; index++)
+        {
+            arguments[index * 2] = cart.Items[index].ProductId;
+            arguments[index * 2 + 1] = cart.Items[index].Quantity;
+        }
+        arguments[^1] = (long)CartTtl.TotalSeconds;
+        await db.ScriptEvaluateAsync(MigrateLegacyCartScript, [ItemKey(userId), userId], arguments);
+    }
+
+    private async Task RetryTransientAsync(Func<Task> operation)
+    {
+        var deadline = DateTime.UtcNow + OperationDeadline;
+        var attempt = 0;
+        while (true)
+        {
+            try
+            {
+                await operation();
+                return;
+            }
+            catch (Exception ex) when (IsTransient(ex) && DateTime.UtcNow < deadline)
+            {
+                var delay = RetryDelays[Math.Min(attempt++, RetryDelays.Length - 1)];
+                if (DateTime.UtcNow + delay > deadline) delay = deadline - DateTime.UtcNow;
+                if (delay > TimeSpan.Zero) await Task.Delay(delay);
+            }
         }
     }
 }

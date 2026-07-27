@@ -33,7 +33,7 @@ public class CartService : Oteldemo.CartService.CartServiceBase
 
         try
         {
-            await _cartStore.AddItemAsync(request.UserId, request.Item.ProductId, request.Item.Quantity);
+            await _cartStore.AddItemAsync(request.UserId, request.Item.ProductId, request.Item.Quantity, request.OperationId);
 
             return Empty;
         }
@@ -82,11 +82,11 @@ public class CartService : Oteldemo.CartService.CartServiceBase
             var cartFailureRate = await _featureFlagHelper.GetDoubleValueAsync("cartFailure", 0);
             if (cartFailureRate > 0 && Random.Shared.NextDouble() < cartFailureRate)
             {
-                await _badCartStore.EmptyCartAsync(request.UserId);
+                await _badCartStore.EmptyCartAsync(request.UserId, request.OperationId);
             }
             else
             {
-                await _cartStore.EmptyCartAsync(request.UserId);
+                await _cartStore.EmptyCartAsync(request.UserId, request.OperationId);
             }
         }
         catch (RpcException ex)

@@ -8,8 +8,8 @@ public interface ICartStore
 {
     void Initialize();
 
-    Task AddItemAsync(string userId, string productId, int quantity);
-    Task EmptyCartAsync(string userId);
+    Task AddItemAsync(string userId, string productId, int quantity, string operationId);
+    Task EmptyCartAsync(string userId, string operationId);
 
     Task<Oteldemo.Cart> GetCartAsync(string userId);
 
