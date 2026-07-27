@@ -29,10 +29,12 @@ export interface CartItem {
 export interface AddItemRequest {
   userId: string;
   item: CartItem | undefined;
+  operationId: string;
 }
 
 export interface EmptyCartRequest {
   userId: string;
+  operationId: string;
 }
 
 export interface GetCartRequest {
@@ -335,7 +337,7 @@ export const CartItem: MessageFns<CartItem> = {
 };
 
 function createBaseAddItemRequest(): AddItemRequest {
-  return { userId: "", item: undefined };
+  return { userId: "", item: undefined, operationId: "" };
 }
 
 export const AddItemRequest: MessageFns<AddItemRequest> = {
@@ -345,6 +347,9 @@ export const AddItemRequest: MessageFns<AddItemRequest> = {
     }
     if (message.item !== undefined) {
       CartItem.encode(message.item, writer.uint32(18).fork()).join();
+    }
+    if (message.operationId !== "") {
+      writer.uint32(26).string(message.operationId);
     }
     return writer;
   },
@@ -372,6 +377,14 @@ export const AddItemRequest: MessageFns<AddItemRequest> = {
           message.item = CartItem.decode(reader, reader.uint32());
           continue;
         }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.operationId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -389,6 +402,11 @@ export const AddItemRequest: MessageFns<AddItemRequest> = {
         ? globalThis.String(object.user_id)
         : "",
       item: isSet(object.item) ? CartItem.fromJSON(object.item) : undefined,
+      operationId: isSet(object.operationId)
+        ? globalThis.String(object.operationId)
+        : isSet(object.operation_id)
+        ? globalThis.String(object.operation_id)
+        : "",
     };
   },
 
@@ -400,6 +418,9 @@ export const AddItemRequest: MessageFns<AddItemRequest> = {
     if (message.item !== undefined) {
       obj.item = CartItem.toJSON(message.item);
     }
+    if (message.operationId !== "") {
+      obj.operationId = message.operationId;
+    }
     return obj;
   },
 
@@ -410,18 +431,22 @@ export const AddItemRequest: MessageFns<AddItemRequest> = {
     const message = createBaseAddItemRequest();
     message.userId = object.userId ?? "";
     message.item = (object.item !== undefined && object.item !== null) ? CartItem.fromPartial(object.item) : undefined;
+    message.operationId = object.operationId ?? "";
     return message;
   },
 };
 
 function createBaseEmptyCartRequest(): EmptyCartRequest {
-  return { userId: "" };
+  return { userId: "", operationId: "" };
 }
 
 export const EmptyCartRequest: MessageFns<EmptyCartRequest> = {
   encode(message: EmptyCartRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.userId !== "") {
       writer.uint32(10).string(message.userId);
+    }
+    if (message.operationId !== "") {
+      writer.uint32(18).string(message.operationId);
     }
     return writer;
   },
@@ -441,6 +466,14 @@ export const EmptyCartRequest: MessageFns<EmptyCartRequest> = {
           message.userId = reader.string();
           continue;
         }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.operationId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -457,6 +490,11 @@ export const EmptyCartRequest: MessageFns<EmptyCartRequest> = {
         : isSet(object.user_id)
         ? globalThis.String(object.user_id)
         : "",
+      operationId: isSet(object.operationId)
+        ? globalThis.String(object.operationId)
+        : isSet(object.operation_id)
+        ? globalThis.String(object.operation_id)
+        : "",
     };
   },
 
@@ -464,6 +502,9 @@ export const EmptyCartRequest: MessageFns<EmptyCartRequest> = {
     const obj: any = {};
     if (message.userId !== "") {
       obj.userId = message.userId;
+    }
+    if (message.operationId !== "") {
+      obj.operationId = message.operationId;
     }
     return obj;
   },
@@ -474,6 +515,7 @@ export const EmptyCartRequest: MessageFns<EmptyCartRequest> = {
   fromPartial<I extends Exact<DeepPartial<EmptyCartRequest>, I>>(object: I): EmptyCartRequest {
     const message = createBaseEmptyCartRequest();
     message.userId = object.userId ?? "";
+    message.operationId = object.operationId ?? "";
     return message;
   },
 };

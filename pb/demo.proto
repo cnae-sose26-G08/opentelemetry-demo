@@ -34,10 +34,12 @@ message CartItem {
 message AddItemRequest {
     string user_id = 1;
     CartItem item = 2;
+    string operation_id = 3;
 }
 
 message EmptyCartRequest {
     string user_id = 1;
+    string operation_id = 2;
 }
 
 message GetCartRequest {
