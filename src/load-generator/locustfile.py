@@ -130,8 +130,22 @@ class WebsiteUser(HttpUser):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.tracer = trace.get_tracer(__name__)
-        self.order_ids = []
+        self.order_ids = {}
         self.last_verify = 0.0
+
+    def _post_with_retry(self, path, body, attempts=3):
+        for attempt in range(attempts):
+            with self.client.post(path, json=body, catch_response=True) as resp:
+                transient = resp.status_code in (408, 429) or resp.status_code >= 500
+                if 200 <= resp.status_code < 300:
+                    return resp
+                if transient and attempt + 1 < attempts:
+                    resp.success()
+                    time.sleep(0.1 * (2 ** attempt))
+                    continue
+                resp.failure(f"POST {path} failed: HTTP {resp.status_code}")
+                return None
+        return None
 
     @task(1)
     def index(self):
@@ -187,27 +201,31 @@ class WebsiteUser(HttpUser):
                     "quantity": quantity,
                 },
                 "userId": user,
+                "operationId": str(uuid.uuid4()),
             }
-            self.client.post("/api/cart", json=cart_item)
+            return self._post_with_retry("/api/cart", cart_item) is not None
 
     def _process_checkout(self, user, checkout_person, multi_count=1):
         with self.tracer.start_as_current_span("user_checkout", context=context.get_current(), attributes={"user.id": user, "item.count": multi_count}):
             for i in range(multi_count):
-                self.add_to_cart(user=user)
+                if not self.add_to_cart(user=user):
+                    migration_checkout_counter.add(1, {"status": "failure", "error": "cart_add_failed"})
+                    return
+            checkout_person["operationId"] = str(uuid.uuid4())
             with self.client.post("/api/checkout", json=checkout_person, catch_response=True) as resp:
                 if resp.status_code != 200:
                     resp.failure(f"Checkout failed: HTTP {resp.status_code}")
                     migration_checkout_counter.add(1, {"status": "failure", "error": str(resp.status_code)})
+                    return
+                body = resp.json()
+                order_id = body.get("orderId")
+                if not order_id:
+                    resp.failure("Checkout response missing order_id")
+                    migration_checkout_counter.add(1, {"status": "failure", "error": "missing_order_id"})
                 else:
-                    body = resp.json()
-                    order_id = body.get("orderId")
-                    if not order_id:
-                        resp.failure("Checkout response missing order_id")
-                        migration_checkout_counter.add(1, {"status": "failure", "error": "missing_order_id"})
-                    else:
-                        self.order_ids.append(order_id)
-                        migration_checkout_counter.add(1, {"status": "success"})
-                        logging.info(f"Order placed: {order_id}")
+                    self.order_ids[order_id] = time.time()
+                    migration_checkout_counter.add(1, {"status": "success"})
+                    logging.info(f"Order placed: {order_id}")
 
     @task(1)
     def checkout(self):
@@ -256,13 +274,16 @@ class WebsiteUser(HttpUser):
                 timeout=3,
             )
             cur = conn.cursor()
-            for oid in list(self.order_ids):
+            grace_period = float(os.environ.get("ORDER_VERIFICATION_GRACE_SECONDS", 300))
+            for oid, placed_at in list(self.order_ids.items()):
+                if now - placed_at < grace_period:
+                    continue
                 cur.execute('SELECT 1 FROM accounting."order" WHERE order_id = %s', (oid,))
                 if cur.fetchone() is None:
                     self.environment.runner.stats.log_error("VERIFY", "/api/checkout", f"Order {oid} not found in DB")
                     logging.error(f"Order {oid} missing from database")
                 else:
-                    self.order_ids.remove(oid)
+                    del self.order_ids[oid]
             cur.close()
             conn.close()
         except Exception as ex:
