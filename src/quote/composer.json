@@ -29,11 +29,11 @@
     "config": {
         "allow-plugins": {
             "php-http/discovery": false
-        }
-    },
-    "policy": {
-        "advisories": {
-            "block": false
+        },
+        "policy": {
+            "advisories": {
+                "block": false
+            }
         }
     }
 }
