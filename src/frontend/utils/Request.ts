@@ -9,6 +9,16 @@ interface IRequestParams {
   headers?: Record<string, string>;
 }
 
+export class HttpError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string
+  ) {
+    super(message);
+    this.name = 'HttpError';
+  }
+}
+
 const request = async <T>({
   url = '',
   method = 'GET',
@@ -25,6 +35,10 @@ const request = async <T>({
   });
 
   const responseText = await response.text();
+
+  if (!response.ok) {
+    throw new HttpError(response.status, responseText || response.statusText);
+  }
 
   if (!!responseText) return JSON.parse(responseText);
 
