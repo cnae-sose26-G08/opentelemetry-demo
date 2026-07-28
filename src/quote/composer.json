@@ -29,6 +29,9 @@
     "config": {
         "allow-plugins": {
             "php-http/discovery": false
+        },
+        "advisories": {
+            "block": false
         }
     }
 }
