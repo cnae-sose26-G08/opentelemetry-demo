@@ -43,5 +43,11 @@ namespace Accounting
             EventName = "accounting.order.parsing_failed",
             Message = "Order parsing failed:")]
         public static partial void OrderParsingFailed(ILogger logger, Exception exception);
+
+        [LoggerMessage(
+            Level = LogLevel.Error,
+            EventName = "accounting.order.poison_message",
+            Message = "Malformed order at {topic}[{partition}] offset {offset}.")]
+        public static partial void PoisonMessage(ILogger logger, string topic, int partition, long offset, Exception exception);
     }
 }

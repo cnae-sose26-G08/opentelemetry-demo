@@ -38,7 +38,7 @@ internal class Consumer : BackgroundService
 
     private readonly ILogger _logger;
     private readonly IConsumer<string, byte[]> _consumer;
-    private readonly string? _dbConnectionString;
+    private readonly string _dbConnectionString;
     private static readonly ActivitySource MyActivitySource = new("Accounting.Consumer");
 
     private enum ProcessingResult
@@ -53,6 +53,16 @@ internal class Consumer : BackgroundService
     {
         _logger = logger;
 
+        var connectionString = Environment.GetEnvironmentVariable("DB_CONNECTION_STRING")
+            ?? throw new InvalidOperationException("The DB_CONNECTION_STRING environment variable is not set.");
+        var connection = new NpgsqlConnectionStringBuilder(connectionString);
+        if (string.IsNullOrWhiteSpace(connection.Host) || string.IsNullOrWhiteSpace(connection.Database) ||
+            string.IsNullOrWhiteSpace(connection.Username))
+        {
+            throw new InvalidOperationException("DB_CONNECTION_STRING must include host, database, and username.");
+        }
+        _dbConnectionString = connection.ConnectionString;
+
         var servers = Environment.GetEnvironmentVariable("KAFKA_ADDR")
             ?? throw new InvalidOperationException("The KAFKA_ADDR environment variable is not set.");
 
@@ -61,7 +71,6 @@ internal class Consumer : BackgroundService
 
         Log.KafkaConnecting(_logger, servers);
 
-        _dbConnectionString = Environment.GetEnvironmentVariable("DB_CONNECTION_STRING");
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -79,7 +88,7 @@ internal class Consumer : BackgroundService
                     var result = ProcessingResult.RetryableFailure;
                     for (var attempt = 0; attempt < MaxMessageRetryAttempts && result == ProcessingResult.RetryableFailure; attempt++)
                     {
-                        result = await ProcessMessageAsync(consumeResult.Message, stoppingToken);
+                        result = await ProcessMessageAsync(consumeResult, stoppingToken);
                         if (result == ProcessingResult.RetryableFailure && attempt + 1 < MaxMessageRetryAttempts)
                         {
                             await Task.Delay(TimeSpan.FromSeconds(Math.Min(1 << attempt, 5)), stoppingToken);
@@ -112,29 +121,27 @@ internal class Consumer : BackgroundService
         }
     }
 
-    private async Task<ProcessingResult> ProcessMessageAsync(Message<string, byte[]> message, CancellationToken stoppingToken)
+    private async Task<ProcessingResult> ProcessMessageAsync(
+        ConsumeResult<string, byte[]> consumeResult,
+        CancellationToken stoppingToken)
     {
+        var message = consumeResult.Message;
         OrderResult order;
         try
         {
             order = OrderResult.Parser.ParseFrom(message.Value);
             if (string.IsNullOrWhiteSpace(order.OrderId))
             {
-                Log.OrderParsingFailed(_logger, new InvalidOperationException("order_id is required"));
+                Log.PoisonMessage(_logger, consumeResult.Topic, consumeResult.Partition.Value, consumeResult.Offset.Value,
+                    new InvalidOperationException("order_id is required"));
                 return ProcessingResult.FatalInvalidMessage;
             }
             Log.OrderReceivedMessage(_logger, order);
         }
         catch (Exception ex)
         {
-            Log.OrderParsingFailed(_logger, ex);
+            Log.PoisonMessage(_logger, consumeResult.Topic, consumeResult.Partition.Value, consumeResult.Offset.Value, ex);
             return ProcessingResult.FatalInvalidMessage;
-        }
-
-        if (_dbConnectionString == null)
-        {
-            Log.OrderParsingFailed(_logger, new InvalidOperationException("DB_CONNECTION_STRING is not set"));
-            return ProcessingResult.RetryableFailure;
         }
 
         try
@@ -172,7 +179,13 @@ internal class Consumer : BackgroundService
             await transaction.CommitAsync(stoppingToken);
             return ProcessingResult.Persisted;
         }
-        catch (DbUpdateException ex) when (ex.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation })
+        catch (DbUpdateException ex) when (ex.InnerException is PostgresException
+        {
+            SqlState: PostgresErrorCodes.UniqueViolation,
+            SchemaName: "accounting",
+            TableName: "order",
+            ConstraintName: "order_pkey"
+        })
         {
             Log.DuplicateOrderSkipped(_logger);
             return ProcessingResult.Duplicate;
