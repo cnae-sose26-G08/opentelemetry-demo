@@ -5,6 +5,7 @@
 
 import json
 import os
+import uuid
 
 import httpx
 
@@ -35,6 +36,7 @@ async def add_to_cart(user_id: str, product_id: str, quantity: int = 1):
             "quantity": quantity,
         },
         "userId": user_id,
+        "operationId": str(uuid.uuid4()),
     }
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT) as client:
@@ -60,7 +62,7 @@ async def get_cart(user_id: str):
 async def empty_cart(user_id: str):
     """Empty the shopping cart for a user."""
     url = f"http://{BASE_URL}/api/cart"
-    payload = {"userId": user_id}
+    payload = {"userId": user_id, "operationId": str(uuid.uuid4())}
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT) as client:
             res = await client.request("DELETE", url, json=payload)
@@ -103,6 +105,7 @@ async def checkout(checkout_person):
     CreditCardInfo is {string creditCardNumber, int32 creditCardCvv, int32 creditCardExpirationYear, int32 creditCardExpirationMonth}
     """
     url = f"http://{BASE_URL}/api/checkout"
+    checkout_person["operationId"] = str(uuid.uuid4())
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT) as client:
             res = await client.post(url, json=checkout_person)

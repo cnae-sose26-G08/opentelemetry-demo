@@ -187,12 +187,12 @@ def _drive_checkout(session, product_id):
     user_id = str(uuid.uuid4())
     cart_resp = session.post(
         f"{FRONTEND_PROXY_URL}/api/cart",
-        json={"item": {"productId": product_id, "quantity": 1}, "userId": user_id},
+        json={"item": {"productId": product_id, "quantity": 1}, "userId": user_id, "operationId": str(uuid.uuid4())},
         timeout=10,
     )
     _raise_for_status(cart_resp, "cart warmup request")
 
-    person = dict(PROBE_PERSON, userId=user_id)
+    person = dict(PROBE_PERSON, userId=user_id, operationId=str(uuid.uuid4()))
     checkout_resp = session.post(
         f"{FRONTEND_PROXY_URL}/api/checkout",
         json=person,
