@@ -8,11 +8,18 @@ using Google.Protobuf;
 using Microsoft.Extensions.Logging;
 using System.Diagnostics.Metrics;
 using System.Diagnostics;
+using System.Threading;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace cart.cartstore;
 
 public class ValkeyCartStore : ICartStore
 {
+    private sealed class TransientCartStoreException(string message) : Exception(message)
+    {
+    }
+
     private readonly ILogger _logger;
     private const int RedisRetryNumber = 30;
     private static readonly TimeSpan CartTtl = TimeSpan.FromHours(2);
@@ -25,35 +32,30 @@ public class ValkeyCartStore : ICartStore
     ];
     private const string AddItemScript = """
         local existing = redis.call('HGET', KEYS[2], ARGV[1])
-        if existing then return tonumber(redis.call('HGET', KEYS[1], ARGV[2]) or '0') end
-        redis.call('HSET', KEYS[2], ARGV[1], '1')
-        local quantity = redis.call('HINCRBY', KEYS[1], ARGV[2], ARGV[3])
+        if existing then
+          if existing ~= ARGV[2] then return 'CONFLICT' end
+          return tostring(redis.call('HGET', KEYS[1], ARGV[3]) or '0')
+        end
+        redis.call('HSET', KEYS[2], ARGV[1], ARGV[2])
+        local quantity = redis.call('HINCRBY', KEYS[1], ARGV[3], ARGV[4])
         if quantity <= 0 then
-          redis.call('HDEL', KEYS[1], ARGV[2])
+          redis.call('HDEL', KEYS[1], ARGV[3])
           quantity = 0
         end
-        redis.call('EXPIRE', KEYS[1], ARGV[4])
-        redis.call('EXPIRE', KEYS[2], ARGV[5])
-        return quantity
+        redis.call('EXPIRE', KEYS[1], ARGV[5])
+        redis.call('EXPIRE', KEYS[2], ARGV[6])
+        return tostring(quantity)
         """;
     private const string EmptyCartScript = """
-        if redis.call('HEXISTS', KEYS[2], ARGV[1]) == 1 then return 1 end
-        redis.call('HSET', KEYS[2], ARGV[1], '1')
+        local existing = redis.call('HGET', KEYS[2], ARGV[1])
+        if existing then
+          if existing ~= ARGV[2] then return 'CONFLICT' end
+          return 'OK'
+        end
+        redis.call('HSET', KEYS[2], ARGV[1], ARGV[2])
         redis.call('DEL', KEYS[1])
-        redis.call('EXPIRE', KEYS[2], ARGV[2])
-        return 1
-        """;
-    private const string MigrateLegacyCartScript = """
-        if redis.call('HLEN', KEYS[1]) ~= 0 then
-          redis.call('HDEL', KEYS[2], 'cart')
-          return 0
-        end
-        for index = 1, #ARGV - 1, 2 do
-          redis.call('HSET', KEYS[1], ARGV[index], ARGV[index + 1])
-        end
-        redis.call('EXPIRE', KEYS[1], ARGV[#ARGV])
-        redis.call('HDEL', KEYS[2], 'cart')
-        return 1
+        redis.call('EXPIRE', KEYS[2], ARGV[3])
+        return 'OK'
         """;
 
     private volatile ConnectionMultiplexer _redis;
@@ -69,14 +71,14 @@ public class ValkeyCartStore : ICartStore
         unit: "s",
         advice: new InstrumentAdvice<double>
         {
-            HistogramBucketBoundaries = [ 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10 ]
+            HistogramBucketBoundaries = [0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10]
         });
     private static readonly Histogram<double> getCartHistogram = CartMeter.CreateHistogram(
         "demo.cart.get_cart.latency",
         unit: "s",
         advice: new InstrumentAdvice<double>
         {
-            HistogramBucketBoundaries = [ 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10 ]
+            HistogramBucketBoundaries = [0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10]
         });
     private readonly ConfigurationOptions _redisConnectionOptions;
 
@@ -122,21 +124,22 @@ public class ValkeyCartStore : ICartStore
 
             Log.RedisConnecting(_logger, _connectionString);
 
-            _redis = ConnectionMultiplexer.Connect(_redisConnectionOptions);
+            var redis = ConnectionMultiplexer.Connect(_redisConnectionOptions);
 
-            if (_redis == null || !_redis.IsConnected)
+            if (!redis.IsConnected)
             {
                 Log.RedisConnectionFailed(_logger);
-
-                // We weren't able to connect to Redis despite some retries with exponential backoff.
-                throw new ApplicationException("Wasn't able to connect to redis");
+                redis.Dispose();
+                throw new TransientCartStoreException("Wasn't able to connect to Valkey");
             }
+
+            _redis = redis;
 
             Log.RedisConnected(_logger);
             var cache = _redis.GetDatabase();
 
             Log.RedisSmallTest(_logger);
-            cache.StringSet("cart", "OK" );
+            cache.StringSet("cart", "OK");
             string res = (string)cache.StringGet("cart");
 
             Log.RedisSmallTestResult(_logger, res);
@@ -157,7 +160,7 @@ public class ValkeyCartStore : ICartStore
         }
     }
 
-    public async Task AddItemAsync(string userId, string productId, int quantity, string operationId)
+    public async Task AddItemAsync(string userId, string productId, int quantity, string operationId, CancellationToken cancellationToken)
     {
         var stopwatch = Stopwatch.StartNew();
 
@@ -166,17 +169,23 @@ public class ValkeyCartStore : ICartStore
         try
         {
             RequireOperationId(operationId);
-            await MigrateLegacyCartAsync(userId);
             var itemKey = ItemKey(userId);
+            var fingerprint = Fingerprint($"v1\0add\0{productId.Length}:{productId}\0{quantity}");
             await RetryTransientAsync(async () =>
             {
                 EnsureRedisConnected();
-                await _redis.GetDatabase().ScriptEvaluateAsync(AddItemScript,
+                var result = await _redis.GetDatabase().ScriptEvaluateAsync(AddItemScript,
                     [itemKey, OperationKey(userId)],
-                    [operationId, productId, quantity, (long)CartTtl.TotalSeconds, (long)OperationTtl.TotalSeconds]);
-            });
+                    [operationId, fingerprint, productId, quantity, (long)CartTtl.TotalSeconds, (long)OperationTtl.TotalSeconds]);
+                ThrowIfConflict(result);
+                return true;
+            }, cancellationToken);
         }
         catch (RpcException)
+        {
+            throw;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
@@ -190,22 +199,27 @@ public class ValkeyCartStore : ICartStore
         }
     }
 
-    public async Task EmptyCartAsync(string userId, string operationId)
+    public async Task EmptyCartAsync(string userId, string operationId, CancellationToken cancellationToken)
     {
         Log.EmptyCartAsync(_logger, userId);
         try
         {
             RequireOperationId(operationId);
-            await MigrateLegacyCartAsync(userId);
             await RetryTransientAsync(async () =>
             {
                 EnsureRedisConnected();
-                await _redis.GetDatabase().ScriptEvaluateAsync(EmptyCartScript,
+                var result = await _redis.GetDatabase().ScriptEvaluateAsync(EmptyCartScript,
                     [ItemKey(userId), OperationKey(userId)],
-                    [operationId, (long)OperationTtl.TotalSeconds]);
-            });
+                    [operationId, Fingerprint("v1\0empty"), (long)OperationTtl.TotalSeconds]);
+                ThrowIfConflict(result);
+                return true;
+            }, cancellationToken);
         }
         catch (RpcException)
+        {
+            throw;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
@@ -215,7 +229,7 @@ public class ValkeyCartStore : ICartStore
         }
     }
 
-    public async Task<Oteldemo.Cart> GetCartAsync(string userId)
+    public async Task<Oteldemo.Cart> GetCartAsync(string userId, CancellationToken cancellationToken)
     {
         var stopwatch = Stopwatch.StartNew();
 
@@ -223,25 +237,21 @@ public class ValkeyCartStore : ICartStore
 
         try
         {
-            EnsureRedisConnected();
-
-            var db = _redis.GetDatabase();
-
-            var values = await db.HashGetAllAsync(ItemKey(userId));
-            if (values.Length == 0)
+            var values = await RetryTransientAsync(async () =>
             {
-                var legacyCart = await db.HashGetAsync(userId, "cart");
-                if (!legacyCart.IsNull)
-                {
-                    return Oteldemo.Cart.Parser.ParseFrom(legacyCart);
-                }
-            }
+                EnsureRedisConnected();
+                return await _redis.GetDatabase().HashGetAllAsync(ItemKey(userId));
+            }, cancellationToken);
             var cart = new Oteldemo.Cart { UserId = userId };
             foreach (var value in values)
             {
                 cart.Items.Add(new Oteldemo.CartItem { ProductId = value.Name.ToString(), Quantity = (int)value.Value });
             }
             return cart;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -279,35 +289,20 @@ public class ValkeyCartStore : ICartStore
         }
     }
 
-    private static bool IsTransient(Exception exception) => exception is RedisConnectionException or RedisTimeoutException;
+    private static bool IsTransient(Exception exception) =>
+        exception is RedisConnectionException or RedisTimeoutException or TransientCartStoreException;
 
-    private async Task MigrateLegacyCartAsync(string userId)
+    private static string Fingerprint(string payload) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(payload)));
+
+    private static void ThrowIfConflict(RedisResult result)
     {
-        EnsureRedisConnected();
-        var db = _redis.GetDatabase();
-        var legacyCart = await db.HashGetAsync(userId, "cart");
-        if (legacyCart.IsNull)
+        if (result.ToString() == "CONFLICT")
         {
-            return;
+            throw new RpcException(new Status(StatusCode.AlreadyExists, "operation_id was already used with a different payload"));
         }
-
-        var cart = Oteldemo.Cart.Parser.ParseFrom(legacyCart);
-        if (cart.Items.Count == 0)
-        {
-            return;
-        }
-
-        var arguments = new RedisValue[cart.Items.Count * 2 + 1];
-        for (var index = 0; index < cart.Items.Count; index++)
-        {
-            arguments[index * 2] = cart.Items[index].ProductId;
-            arguments[index * 2 + 1] = cart.Items[index].Quantity;
-        }
-        arguments[^1] = (long)CartTtl.TotalSeconds;
-        await db.ScriptEvaluateAsync(MigrateLegacyCartScript, [ItemKey(userId), userId], arguments);
     }
 
-    private static async Task RetryTransientAsync(Func<Task> operation)
+    private static async Task<T> RetryTransientAsync<T>(Func<Task<T>> operation, CancellationToken cancellationToken)
     {
         var deadline = DateTime.UtcNow + OperationDeadline;
         var attempt = 0;
@@ -315,14 +310,14 @@ public class ValkeyCartStore : ICartStore
         {
             try
             {
-                await operation();
-                return;
+                cancellationToken.ThrowIfCancellationRequested();
+                return await operation();
             }
             catch (Exception ex) when (IsTransient(ex) && DateTime.UtcNow < deadline)
             {
                 var delay = RetryDelays[Math.Min(attempt++, RetryDelays.Length - 1)];
                 if (DateTime.UtcNow + delay > deadline) delay = deadline - DateTime.UtcNow;
-                if (delay > TimeSpan.Zero) await Task.Delay(delay);
+                if (delay > TimeSpan.Zero) await Task.Delay(delay, cancellationToken);
             }
         }
     }
