@@ -91,6 +91,7 @@ type AddItemRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	UserId        string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
 	Item          *CartItem              `protobuf:"bytes,2,opt,name=item,proto3" json:"item,omitempty"`
+	OperationId   string                 `protobuf:"bytes,3,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -139,9 +140,17 @@ func (x *AddItemRequest) GetItem() *CartItem {
 	return nil
 }
 
+func (x *AddItemRequest) GetOperationId() string {
+	if x != nil {
+		return x.OperationId
+	}
+	return ""
+}
+
 type EmptyCartRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	UserId        string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	OperationId   string                 `protobuf:"bytes,2,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -179,6 +188,13 @@ func (*EmptyCartRequest) Descriptor() ([]byte, []int) {
 func (x *EmptyCartRequest) GetUserId() string {
 	if x != nil {
 		return x.UserId
+	}
+	return ""
+}
+
+func (x *EmptyCartRequest) GetOperationId() string {
+	if x != nil {
+		return x.OperationId
 	}
 	return ""
 }
@@ -2225,12 +2241,14 @@ const file_demo_proto_rawDesc = "" +
 	"\bCartItem\x12\x1d\n" +
 	"\n" +
 	"product_id\x18\x01 \x01(\tR\tproductId\x12\x1a\n" +
-	"\bquantity\x18\x02 \x01(\x05R\bquantity\"Q\n" +
+	"\bquantity\x18\x02 \x01(\x05R\bquantity\"t\n" +
 	"\x0eAddItemRequest\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\x12&\n" +
-	"\x04item\x18\x02 \x01(\v2\x12.oteldemo.CartItemR\x04item\"+\n" +
+	"\x04item\x18\x02 \x01(\v2\x12.oteldemo.CartItemR\x04item\x12!\n" +
+	"\foperation_id\x18\x03 \x01(\tR\voperationId\"N\n" +
 	"\x10EmptyCartRequest\x12\x17\n" +
-	"\auser_id\x18\x01 \x01(\tR\x06userId\")\n" +
+	"\auser_id\x18\x01 \x01(\tR\x06userId\x12!\n" +
+	"\foperation_id\x18\x02 \x01(\tR\voperationId\")\n" +
 	"\x0eGetCartRequest\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\"I\n" +
 	"\x04Cart\x12\x17\n" +
