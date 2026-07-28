@@ -8,6 +8,7 @@ import { CartItem, OrderResult, PlaceOrderRequest } from '../protos/demo';
 import { IProductCart } from '../types/Cart';
 import { useCurrency } from './Currency.provider';
 import { HttpError } from '../utils/Request';
+import { v4 as uuidv4 } from 'uuid';
 
 const retryTransient = (failureCount: number, error: Error) =>
   failureCount < 2 && (!(error instanceof HttpError) || error.status === 408 || error.status === 429 || error.status >= 500);
@@ -69,7 +70,7 @@ const CartProvider = ({ children }: IProps) => {
   });
 
   const addItem = useCallback(
-    (item: CartItem) => addCartMutation.mutateAsync({ ...item, currencyCode: selectedCurrency, operationId: crypto.randomUUID() }),
+    (item: CartItem) => addCartMutation.mutateAsync({ ...item, currencyCode: selectedCurrency, operationId: uuidv4() }),
     [addCartMutation, selectedCurrency]
   );
 
@@ -78,15 +79,15 @@ const CartProvider = ({ children }: IProps) => {
       const existing = cart.items.find(i => i.productId === productId);
       const delta = newQuantity - (existing?.quantity ?? 0);
       if (delta !== 0) {
-        addCartMutation.mutateAsync({ productId, quantity: delta, currencyCode: selectedCurrency, operationId: crypto.randomUUID() });
+        addCartMutation.mutateAsync({ productId, quantity: delta, currencyCode: selectedCurrency, operationId: uuidv4() });
       }
     },
     [addCartMutation, cart.items, selectedCurrency]
   );
-  const emptyCart = useCallback(() => emptyCartMutation.mutateAsync({ operationId: crypto.randomUUID() }), [emptyCartMutation]);
+  const emptyCart = useCallback(() => emptyCartMutation.mutateAsync({ operationId: uuidv4() }), [emptyCartMutation]);
   const placeOrder = useCallback(
     (order: Omit<PlaceOrderRequest, 'operationId'>) =>
-      placeOrderMutation.mutateAsync({ ...order, operationId: crypto.randomUUID(), currencyCode: selectedCurrency }),
+      placeOrderMutation.mutateAsync({ ...order, operationId: uuidv4(), currencyCode: selectedCurrency }),
     [placeOrderMutation, selectedCurrency]
   );
 
