@@ -1474,6 +1474,7 @@ type PlaceOrderRequest struct {
 	UserId        string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
 	UserCurrency  string                 `protobuf:"bytes,2,opt,name=user_currency,json=userCurrency,proto3" json:"user_currency,omitempty"`
 	Address       *Address               `protobuf:"bytes,3,opt,name=address,proto3" json:"address,omitempty"`
+	OperationId   string                 `protobuf:"bytes,4,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
 	Email         string                 `protobuf:"bytes,5,opt,name=email,proto3" json:"email,omitempty"`
 	CreditCard    *CreditCardInfo        `protobuf:"bytes,6,opt,name=credit_card,json=creditCard,proto3" json:"credit_card,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -1529,6 +1530,13 @@ func (x *PlaceOrderRequest) GetAddress() *Address {
 		return x.Address
 	}
 	return nil
+}
+
+func (x *PlaceOrderRequest) GetOperationId() string {
+	if x != nil {
+		return x.OperationId
+	}
+	return ""
 }
 
 func (x *PlaceOrderRequest) GetEmail() string {
@@ -2327,11 +2335,12 @@ const file_demo_proto_rawDesc = "" +
 	"\x05items\x18\x05 \x03(\v2\x13.oteldemo.OrderItemR\x05items\"a\n" +
 	"\x1cSendOrderConfirmationRequest\x12\x14\n" +
 	"\x05email\x18\x01 \x01(\tR\x05email\x12+\n" +
-	"\x05order\x18\x02 \x01(\v2\x15.oteldemo.OrderResultR\x05order\"\xcf\x01\n" +
+	"\x05order\x18\x02 \x01(\v2\x15.oteldemo.OrderResultR\x05order\"\xf2\x01\n" +
 	"\x11PlaceOrderRequest\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\x12#\n" +
 	"\ruser_currency\x18\x02 \x01(\tR\fuserCurrency\x12+\n" +
-	"\aaddress\x18\x03 \x01(\v2\x11.oteldemo.AddressR\aaddress\x12\x14\n" +
+	"\aaddress\x18\x03 \x01(\v2\x11.oteldemo.AddressR\aaddress\x12!\n" +
+	"\foperation_id\x18\x04 \x01(\tR\voperationId\x12\x14\n" +
 	"\x05email\x18\x05 \x01(\tR\x05email\x129\n" +
 	"\vcredit_card\x18\x06 \x01(\v2\x18.oteldemo.CreditCardInfoR\n" +
 	"creditCard\"A\n" +

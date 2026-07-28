@@ -232,6 +232,7 @@ message PlaceOrderRequest {
     string user_currency = 2;
 
     Address address = 3;
+    string operation_id = 4;
     string email = 5;
     CreditCardInfo credit_card = 6;
 }

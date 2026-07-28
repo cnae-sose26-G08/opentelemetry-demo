@@ -186,6 +186,7 @@ export interface PlaceOrderRequest {
   userId: string;
   userCurrency: string;
   address: Address | undefined;
+  operationId: string;
   email: string;
   creditCard: CreditCardInfo | undefined;
 }
@@ -2472,7 +2473,7 @@ export const SendOrderConfirmationRequest: MessageFns<SendOrderConfirmationReque
 };
 
 function createBasePlaceOrderRequest(): PlaceOrderRequest {
-  return { userId: "", userCurrency: "", address: undefined, email: "", creditCard: undefined };
+  return { userId: "", userCurrency: "", address: undefined, operationId: "", email: "", creditCard: undefined };
 }
 
 export const PlaceOrderRequest: MessageFns<PlaceOrderRequest> = {
@@ -2485,6 +2486,9 @@ export const PlaceOrderRequest: MessageFns<PlaceOrderRequest> = {
     }
     if (message.address !== undefined) {
       Address.encode(message.address, writer.uint32(26).fork()).join();
+    }
+    if (message.operationId !== "") {
+      writer.uint32(34).string(message.operationId);
     }
     if (message.email !== "") {
       writer.uint32(42).string(message.email);
@@ -2526,6 +2530,14 @@ export const PlaceOrderRequest: MessageFns<PlaceOrderRequest> = {
           message.address = Address.decode(reader, reader.uint32());
           continue;
         }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.operationId = reader.string();
+          continue;
+        }
         case 5: {
           if (tag !== 42) {
             break;
@@ -2564,6 +2576,11 @@ export const PlaceOrderRequest: MessageFns<PlaceOrderRequest> = {
         ? globalThis.String(object.user_currency)
         : "",
       address: isSet(object.address) ? Address.fromJSON(object.address) : undefined,
+      operationId: isSet(object.operationId)
+        ? globalThis.String(object.operationId)
+        : isSet(object.operation_id)
+        ? globalThis.String(object.operation_id)
+        : "",
       email: isSet(object.email) ? globalThis.String(object.email) : "",
       creditCard: isSet(object.creditCard)
         ? CreditCardInfo.fromJSON(object.creditCard)
@@ -2584,6 +2601,9 @@ export const PlaceOrderRequest: MessageFns<PlaceOrderRequest> = {
     if (message.address !== undefined) {
       obj.address = Address.toJSON(message.address);
     }
+    if (message.operationId !== "") {
+      obj.operationId = message.operationId;
+    }
     if (message.email !== "") {
       obj.email = message.email;
     }
@@ -2603,6 +2623,7 @@ export const PlaceOrderRequest: MessageFns<PlaceOrderRequest> = {
     message.address = (object.address !== undefined && object.address !== null)
       ? Address.fromPartial(object.address)
       : undefined;
+    message.operationId = object.operationId ?? "";
     message.email = object.email ?? "";
     message.creditCard = (object.creditCard !== undefined && object.creditCard !== null)
       ? CreditCardInfo.fromPartial(object.creditCard)
