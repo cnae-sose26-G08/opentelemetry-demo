@@ -2,6 +2,10 @@
 
 This service provides checkout services for the application.
 
+`operation_id` makes checkout retries identify the same order. Payment and
+shipping still lack durable saga state and compensation, so a process failure
+between side effects can repeat or leave a partially completed order.
+
 ## Local Build
 
 To build the service binary, run:

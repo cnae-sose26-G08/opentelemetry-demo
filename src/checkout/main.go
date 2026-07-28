@@ -322,9 +322,9 @@ func (cs *checkout) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (
 		}
 	}()
 
-	orderID, err := uuid.NewUUID()
+	orderID, err := uuid.Parse(req.GetOperationId())
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to generate order uuid")
+		return nil, status.Error(codes.InvalidArgument, "operation_id must be a valid UUID")
 	}
 
 	prep, err := cs.prepareOrderItemsAndShippingQuoteFromCart(ctx, req.UserId, req.UserCurrency, req.Address)
@@ -364,7 +364,7 @@ func (cs *checkout) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (
 	shippingTrackingAttribute := attribute.String("demo.shipping.tracking.id", shippingTrackingID)
 	span.AddEvent("shipped", trace.WithAttributes(shippingTrackingAttribute))
 
-	if err := cs.emptyUserCart(ctx, req.UserId); err != nil {
+	if err := cs.emptyUserCart(ctx, req.UserId, orderID); err != nil {
 		logger.Warn("failed to empty cart after shipping order", slog.Any("error", err))
 	}
 
@@ -534,8 +534,8 @@ func (cs *checkout) getUserCart(ctx context.Context, userID string) ([]*pb.CartI
 	return cart.GetItems(), nil
 }
 
-func (cs *checkout) emptyUserCart(ctx context.Context, userID string) error {
-	operationID := uuid.NewString()
+func (cs *checkout) emptyUserCart(ctx context.Context, userID string, orderID uuid.UUID) error {
+	operationID := uuid.NewSHA1(orderID, []byte("empty-cart")).String()
 	if _, err := cs.cartSvcClient.EmptyCart(ctx, &pb.EmptyCartRequest{UserId: userID, OperationId: operationID}); err != nil {
 		return fmt.Errorf("failed to empty user cart during checkout: %+v", err)
 	}
