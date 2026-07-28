@@ -307,7 +307,7 @@ public class ValkeyCartStore : ICartStore
         await db.ScriptEvaluateAsync(MigrateLegacyCartScript, [ItemKey(userId), userId], arguments);
     }
 
-    private async Task RetryTransientAsync(Func<Task> operation)
+    private static async Task RetryTransientAsync(Func<Task> operation)
     {
         var deadline = DateTime.UtcNow + OperationDeadline;
         var attempt = 0;
